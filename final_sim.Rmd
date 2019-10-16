@@ -1,0 +1,126 @@
+---
+title: "final_simulation"
+author: "Maryam"
+date: "August 4, 2019"
+output: html_document
+---
+### Loading glasso and requirements
+
+```{r packages}
+library(glasso)
+library(abind)
+library(Matrix)
+```
+### Initializing paramteres and setting seed
+```{r init}
+n <- 30 #number of samples
+p <- 10 #number of principal components
+m <- 100 #number of responses
+set.seed(100)
+```
+### Generating X_i and x (n samples of X_i)
+```{r genx}
+samples <- list()
+for(i in 1:n){
+   X_i <- matrix(0L, nrow = m, ncol = m * p) #initializing X_i with zeros, dim(X_i) = m * mp
+   x_i <- matrix(rnorm(1 * p), ncol = p) #dim(x_i) = 1 * p
+   for(j in 1:(m)){                      #filling the main diagonal of X_i with x_i
+     X_i[j, seq(((j-1)*p)+1,j*p)] = x_i
+   }
+   samples[[i]] <- X_i
+}
+x <- abind(samples, rev.along = 3) #abind: converting array into matrix
+```
+### Generating y_i (with X_i, beta and sigma), and y (n samples of y_i)
+```{r geny}
+mu <- 0
+sigma <- 0.1
+labels <- list()
+for(i in 1:n){
+  beta <- matrix(rnorm(p*m), ncol = m) #dim(beta) = p * m
+  beta_star <- matrix(beta, nrow = p*m) 
+  eps <- matrix(rnorm(m, mean = mu, sd = sigma), ncol = 1) #dim(eps) = m * 1
+  h <- x[i,,] %*% beta_star
+  y_i <- h + eps #dim(y_i) = m * 1
+  labels[[i]] <- y_i
+}    
+y <- abind(labels, rev.along = 3) #abind: converting array into matrix
+```
+### Creating a random ${\Omega}_{t-1}$ for the first iteration
+```{r sparse}
+s_sparse <- 2 * m * m / 3
+omega_t <- rsparsematrix(nrow = m, ncol = m, nnz = s_sparse, symmetric = FALSE, rand.x = rnorm)
+#omega_t <- matrix(rnorm(m*m), nrow = m)
+```
+### glasso function
+```{r}
+ myglasso <- function(S){
+      #zero<-matrix(c(sample(1:floor(m/2), floor(m/2)+10, replace = TRUE)), ncol=2, byrow=TRUE)
+      a<-glasso(S, rho = 0.1) #, zero = zero) 
+      return(a$wi)
+  }
+```
+
+### Computing the whole steps for 100 iterations
+#### ($\hat{\beta}_t = A^{-1}B$ where $A = \sum_{i=1}^{n}X^T\Omega X$, $B = \sum_{i=1}^{n}X^T\Omega Y$ and $\Omega = {\Sigma}^{-1}$)
+```{r all}
+y_axis <- list()
+n_iters <- 10
+for(t in 1:n_iters){
+  oldtime <- Sys.time()
+  print(paste("iteration", t))
+  A <- matrix(0L, nrow = m * p, ncol = m * p) #initialize A with zeros, dim(A) = mp * mp
+  B <- matrix(0L, nrow = m * p, ncol = 1) #initialize B with zeros, dim(B) = mp * 1
+  for(i in 1:n){                          #computing A and B for n samples
+    new_x_i <- matrix(x[i,,], nrow = m, ncol = m * p)
+    a <- matrix((t(new_x_i) %*% omega_t %*% new_x_i), nrow = m * p, ncol = m * p)
+    A <- A + a
+    new_y_i <- matrix(y[i,,], nrow = m, ncol = 1)
+    b <- t(new_x_i) %*% omega_t %*% new_y_i
+    B <- B + b
+  }
+  isinv <- function(m) class(try(solve(m),silent=T))=="matrix" #checking if a matrix is invertible 
+  is_inv_A <- isinv(A)
+  if(is_inv_A){
+    #print("A is invertible, we can calculate beta")
+    A_inv <- solve(A)
+    Beta <- A_inv %*% B 
+    Beta_t <- matrix(Beta, nrow = p, ncol = m) #dim(Beta) = p * m
+  }
+  else{
+    Beta_t <- matrix(0L, nrow = p, ncol = m)
+    print("couldn't find beta")
+  }
+  
+  
+  diffMatrix = Beta - beta_star  # The change per-timepoint
+  l2n <- sqrt(sum(diffMatrix^2)) # The L2-norm
+  #eigenval <- eigen(t(diffMatrix) %*% diffMatrix)
+  #l2n <- sqrt(eigenval$values[1])# The L2-norm
+  print(paste("L2norm of (Beta_t - beta) is:", l2n))
+  y_axis[[t]] <- l2n
+ 
+  S <- matrix(0L, nrow = m, ncol = m)
+  for(i in 1:n){
+    new_x_i <- matrix(x[i,,], nrow = m, ncol = m * p)
+    new_y_i <- matrix(y[i,,], nrow = m, ncol = 1)
+    epsilon <- new_y_i - (new_x_i %*% matrix(Beta_t, nrow = p*m))
+    s <- epsilon %*% t(epsilon)
+    S <- S + s
+  }
+  S <- S/n
+  if(isSymmetric(S)) {
+    #print("S is symmetric")
+    omega_t <- myglasso(S) #computing omega 
+  }
+  
+  newtime <- Sys.time()
+  print(paste(newtime - oldtime, "seconds has been spent"))
+}
+```
+### plot the result
+```{r}
+plot(seq(1, t, 1), y_axis, main = "L2norms",type = "l", col = "blue" , xlab = "iteration", ylab = "L2norm")
+```
+
+

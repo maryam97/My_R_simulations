@@ -1,0 +1,173 @@
+---
+title: "k-fold cv"
+author: "Maryam"
+date: "August 3, 2019"
+output: html_document
+---
+
+```{r packages}
+library(glasso)
+library(abind)
+library(Matrix)
+```
+### Initializing paramteres and setting seed
+```{r init}
+n <- 30 #number of samples
+p <- 10 #number of principal components
+m <- 100 #number of responses
+set.seed(100)
+```
+### Generating X_i and x (n samples of X_i)
+```{r genx}
+samples <- list()
+for(i in 1:n){
+   X_i <- matrix(0L, nrow = m, ncol = m * p) #initializing X_i with zeros, dim(X_i) = m * mp
+   x_i <- matrix(runif(1 * p), ncol = p) #dim(x_i) = 1 * p
+   for(j in 1:(m)){                      #filling the main diagonal of X_i with x_i
+     X_i[j, seq(((j-1)*p)+1,j*p)] = x_i
+   }
+   samples[[i]] <- X_i
+}
+x <- abind(samples, rev.along = 3) #abind: converting array into matrix
+```
+### Generating y_i (with X_i, beta and sigma), and y (n samples of y_i)
+```{r geny}
+mu <- 0
+sigma <- 0.1
+labels <- list()
+for(i in 1:n){
+  beta <- matrix(runif(p*m), ncol = m) #dim(beta) = m * p
+  beta_star <- matrix(beta, nrow = p*m) 
+  eps <- matrix(rnorm(m, mean = mu, sd = sigma), ncol = 1) #dim(eps) = m * 1
+  h <- x[i,,] %*% beta_star
+  y_i <- h + eps #dim(y_i) = m * 1
+  labels[[i]] <- y_i
+}    
+y <- abind(labels, rev.along = 3) #abind: converting array into matrix
+```
+### Creating a random ${\Omega}_{t-1}$ for the first iteration
+```{r}
+s_sparse <- 3 * m * m / 5
+omega_t <- rsparsematrix(nrow = m, ncol = m, nnz = s_sparse, symmetric = FALSE, rand.x = rnorm)
+```
+### 5-fold cross-validation
+```{r}
+folds_num <- 5
+final_res <- data.frame("1e-3" = rep(NA, folds_num), "1e-2" = rep(NA, folds_num), "1e-1" = rep(NA, folds_num), "1e0" = rep(NA, folds_num), "1e1" = rep(NA, folds_num))
+
+for(lambda in list(0.001, 0.01, 0.1, 1, 10)){
+  oldtime <- Sys.time()
+  result <- list()
+  print(paste("lambda is: ", lambda))
+  
+  dist <- sample(rep(1:folds_num, length.out = n))
+  
+  for(k in 1:folds_num){
+    print(paste(" fold", k))
+    w <- which(dist == k)
+    y_test_list <- labels[w]
+    y_train_list <- labels[-w]
+    x_test_list <- samples[w]
+    x_train_list <- samples[-w]
+    
+    y_test <- abind(y_test_list, rev.along = 3)
+    y_train <- abind(y_train_list, rev.along = 3)
+    x_test <- abind(x_test_list, rev.along = 3)
+    x_train <- abind(x_train_list, rev.along = 3)
+    n_train <- dim(x_train)[1]
+    ### train the model - finding beta_t and omega_t with x_train and y_train
+    y_axis <- list()
+    n_iters <- 10
+    for(t in 1:n_iters){
+      print(paste("  iteration", t))
+      A <- matrix(0L, nrow = m * p, ncol = m * p) #initialize A with zeros, dim(A) = mp * mp
+      B <- matrix(0L, nrow = m * p, ncol = 1) #initialize B with zeros, dim(B) = mp * 1
+      for(i in 1:n_train){                          #computing A and B for n samples
+        new_x_i <- matrix(x_train[i,,], nrow = m, ncol = m * p)
+        a <- matrix((t(new_x_i) %*% omega_t %*% new_x_i), nrow = m * p, ncol = m * p)
+        A <- A + a
+        new_y_i <- matrix(y_train[i,,], nrow = m, ncol = 1)
+        b <- t(new_x_i) %*% omega_t %*% new_y_i
+        B <- B + b
+      }
+      isinv <- function(m) class(try(solve(m),silent=T))=="matrix" #checking if a matrix is invertible 
+      is_inv_A <- isinv(A)
+      if(is_inv_A){
+        A_inv <- solve(A)
+        Beta <- A_inv %*% B 
+        Beta_t <- matrix(Beta, nrow = p, ncol = m) #dim(Beta) = p * m
+      }
+      else{
+        Beta_t <- matrix(0L, nrow = p, ncol = m)
+        print("couldn't find beta")
+      }
+      
+      diffMatrix = Beta - beta_star  # The change per-timepoint
+      l2n = sqrt(sum(diffMatrix^2)) # The L2-norm
+      print(paste("   L2norm of (Beta_t - beta) is:", l2n))
+      y_axis[[t]] <- l2n
+      
+      myglasso <- function(S){
+          #zero<-matrix(c(sample(1:floor(m/2), floor(m/2)+10, replace = TRUE)), ncol=2, byrow=TRUE)
+          a<-glasso(S, rho = lambda) #, zero = zero) 
+          return(a$wi)
+      }
+      S <- matrix(0L, nrow = m, ncol = m)
+      for(i in 1:n_train){
+        new_x_i <- matrix(x_train[i,,], nrow = m, ncol = m*p)
+        new_y_i <- matrix(y_train[i,,], nrow = m, ncol = 1)
+        epsilon <- new_y_i - (new_x_i %*% matrix(Beta_t, nrow = p*m))
+        s <- epsilon %*% t(epsilon)
+        S <- S + s
+      }
+      S <- S/n_train
+      if(isSymmetric(S)) {
+        omega_t <- myglasso(S) #computing omega 
+      }
+      
+    }
+    ### we found beta_t, let's predict y
+    y_pred_list = list()
+    for(i in 1:(n - n_train)){
+      y_pred_list[[i]] <- x_test[i,,] %*% beta_star + eps
+    }
+    y_pred <- abind(y_pred_list, rev.along = 3)
+    err <- sum((y_test - y_pred)^2)
+    mse <- err/(2 * n)
+    print(paste("    error: ", err))
+    print(paste("    mean square error: ", mse))
+    result[[k]] <- mse
+  }
+  #col_name <- paste0("X1e", log10(lambda))
+  #print(col_name)
+  if(lambda == 0.001) final_res$"X1e.3" <- unlist(result)
+  else if(lambda == 0.01) final_res$"X1e.2" <- unlist(result)
+  else if(lambda == 0.1) final_res$"X1e.1" <- unlist(result)
+  else if(lambda == 1) final_res$"X1e0" <- unlist(result)
+  else if(lambda == 10) final_res$"X1e1" <- unlist(result)
+  
+  newtime <- Sys.time()
+  print(paste(newtime - oldtime, "seconds has been spent"))
+}
+```
+
+```{r}
+final_res
+```
+
+```{r}
+sapply(final_res, mean, na.rm = TRUE)
+```
+```{r}
+sapply(final_res, sd, na.rm = TRUE)
+```
+```{r}
+sapply(final_res, sum, na.rm = TRUE)
+```
+
+
+
+
+
+
+
